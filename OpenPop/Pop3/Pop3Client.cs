@@ -1,17 +1,18 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
-using System.IO;
+using System.Security.Authentication;
 using System.Text;
 using System.Text.RegularExpressions;
+using OpenPop.Common;
+using OpenPop.Common.Logging;
 using OpenPop.Mime;
 using OpenPop.Mime.Header;
 using OpenPop.Pop3.Exceptions;
-using OpenPop.Common;
-using OpenPop.Common.Logging;
 
 namespace OpenPop.Pop3
 {
@@ -173,7 +174,26 @@ namespace OpenPop.Pop3
 		/// <exception cref="PopServerNotFoundException">If it was not possible to connect to the server</exception>
 		/// <exception cref="ArgumentNullException">If <paramref name="hostname"/> is <see langword="null"/></exception>
 		/// <exception cref="ArgumentOutOfRangeException">If port is not in the range [<see cref="IPEndPoint.MinPort"/>, <see cref="IPEndPoint.MaxPort"/> or if any of the timeouts is less than -1.</exception>
-		public void Connect(string hostname, int port, bool useSsl, int receiveTimeout, int sendTimeout, RemoteCertificateValidationCallback certificateValidator)
+        public void Connect(string hostname, int port, bool useSsl, int receiveTimeout, int sendTimeout, RemoteCertificateValidationCallback certificateValidator)
+        {
+            Connect(hostname, port, useSsl, receiveTimeout, sendTimeout, certificateValidator, SslProtocols.Default);
+        }
+
+		/// <summary>
+		/// Connects to a remote POP3 server
+		/// </summary>
+		/// <param name="hostname">The <paramref name="hostname"/> of the POP3 server</param>
+		/// <param name="port">The port of the POP3 server</param>
+		/// <param name="useSsl"><see langword="true"/> if SSL should be used. <see langword="false"/> if plain TCP should be used.</param>
+		/// <param name="receiveTimeout">Timeout in milliseconds before a socket should time out from reading. Set to 0 or -1 to specify infinite timeout.</param>
+		/// <param name="sendTimeout">Timeout in milliseconds before a socket should time out from sending. Set to 0 or -1 to specify infinite timeout.</param>
+		/// <param name="certificateValidator">If you want to validate the certificate in a SSL connection, pass a reference to your validator. Supply <see langword="null"/> if default should be used.</param>
+        /// <param name="sslProtocol">Specify the protocol to be used in a SSL connection. Supply <see langword="null"/> if default should be used.</param>
+		/// <exception cref="PopServerNotAvailableException">If the server did not send an OK message when a connection was established</exception>
+		/// <exception cref="PopServerNotFoundException">If it was not possible to connect to the server</exception>
+		/// <exception cref="ArgumentNullException">If <paramref name="hostname"/> is <see langword="null"/></exception>
+		/// <exception cref="ArgumentOutOfRangeException">If port is not in the range [<see cref="IPEndPoint.MinPort"/>, <see cref="IPEndPoint.MaxPort"/> or if any of the timeouts is less than -1.</exception>
+        public void Connect(string hostname, int port, bool useSsl, int receiveTimeout, int sendTimeout, RemoteCertificateValidationCallback certificateValidator, SslProtocols sslProtocol)
 		{
 			AssertDisposed();
 
@@ -225,13 +245,20 @@ namespace OpenPop.Pop3
 				}
 				else
 				{
-					sslStream = new SslStream(clientSocket.GetStream(), false, certificateValidator);
+                    sslStream = new SslStream(clientSocket.GetStream(), false, certificateValidator);
 				}
 				sslStream.ReadTimeout = receiveTimeout;
 				sslStream.WriteTimeout = sendTimeout;
 
 				// Authenticate the server
-				sslStream.AuthenticateAsClient(hostname);
+                if (sslProtocol == SslProtocols.Default)
+                {
+                    sslStream.AuthenticateAsClient(hostname);
+                }
+                else
+                {
+                    sslStream.AuthenticateAsClient(hostname, null, sslProtocol, true);
+                }
 
 				stream = sslStream;
 			}
@@ -289,7 +316,7 @@ namespace OpenPop.Pop3
 		/// Authenticates a user towards the POP server using some <see cref="AuthenticationMethod"/>.
 		/// </summary>
 		/// <param name="username">The username</param>
-		/// <param name="password">The user password</param>
+		/// <param name="password">The user password (Token if using OAuth2)</param>
 		/// <param name="authenticationMethod">The way that the client should authenticate towards the server</param>
 		/// <exception cref="NotSupportedException">If <see cref="AuthenticationMethod.Apop"/> is used, but not supported by the server</exception>
 		/// <exception cref="InvalidLoginException">If the user credentials was not accepted</exception>
@@ -331,6 +358,10 @@ namespace OpenPop.Pop3
 					case AuthenticationMethod.CramMd5:
 						AuthenticateUsingCramMd5(username, password);
 						break;
+
+                    case AuthenticationMethod.OAuth2:
+                        AuthenticateUsingOauth2(username, password);
+                        break;
 				}
 			} catch(PopServerException e)
 			{
@@ -420,6 +451,22 @@ namespace OpenPop.Pop3
 
 			// Authentication was successful if no exceptions thrown before getting here
 		}
+
+        /// <summary>
+        /// Authenticates using the Oauth2 commands
+        /// </summary>
+        /// <param name="username">The username</param>
+        /// <param name="password">The Oauth2 token</param>
+        /// <exception cref="PopServerException">If the server responded with -ERR</exception>
+        private void AuthenticateUsingOauth2(string username, string password)
+        {
+            string auth = "user=" + username + "\u0001auth=Bearer " + password + "\u0001\u0001";
+            string authToken = Convert.ToBase64String(System.Text.ASCIIEncoding.ASCII.GetBytes(auth));
+            SendCommand("AUTH XOAUTH2");
+            SendCommand(authToken);
+
+            // Authentication was successful if no exceptions thrown before getting here
+        }
 		#endregion
 
 		#region Public POP3 commands
